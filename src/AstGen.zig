@@ -15,6 +15,7 @@ const refToIndex = Zir.refToIndex;
 const indexToRef = Zir.indexToRef;
 const trace = @import("tracy.zig").trace;
 const BuiltinFn = @import("BuiltinFn.zig");
+const print = std.debug.print;
 
 gpa: Allocator,
 tree: *const Ast,
@@ -189,11 +190,13 @@ pub fn generate(gpa: Allocator, tree: Ast) Allocator.Error!Zir {
         }
     }
 
-    return Zir{
+    const zir = Zir{
         .instructions = astgen.instructions.toOwnedSlice(),
         .string_bytes = astgen.string_bytes.toOwnedSlice(gpa),
         .extra = astgen.extra.toOwnedSlice(gpa),
     };
+
+    return zir;
 }
 
 pub fn deinit(astgen: *AstGen, gpa: Allocator) void {
@@ -2469,14 +2472,16 @@ fn checkUsed(
             .local_val => {
                 const s = scope.cast(Scope.LocalVal).?;
                 if (!s.used) {
-                    try astgen.appendErrorTok(s.token_src, "unused {s}", .{@tagName(s.id_cat)});
+                    // try astgen.appendErrorTok(s.token_src, "unused {s}", .{@tagName(s.id_cat)});
+                    print("Careful, unused element found. '{s}'\n", .{@tagName(s.id_cat)});
                 }
                 scope = s.parent;
             },
             .local_ptr => {
                 const s = scope.cast(Scope.LocalPtr).?;
                 if (!s.used) {
-                    try astgen.appendErrorTok(s.token_src, "unused {s}", .{@tagName(s.id_cat)});
+                    // try astgen.appendErrorTok(s.token_src, "unused {s}", .{@tagName(s.id_cat)});
+                    print("Careful, unused element found. '{s}'\n", .{@tagName(s.id_cat)});
                 }
                 scope = s.parent;
             },
@@ -8615,6 +8620,7 @@ fn appendErrorTokNotes(
         astgen.extra.appendSliceAssumeCapacity(notes);
         break :blk @intCast(u32, notes_start);
     } else 0;
+
     try astgen.compile_errors.append(astgen.gpa, .{
         .msg = msg,
         .node = 0,
