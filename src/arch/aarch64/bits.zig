@@ -332,23 +332,17 @@ pub const Instruction = union(enum) {
         op: u1,
         sf: u1,
     },
-
-    pub const Shift = struct {
-        shift: Type = .lsl,
-        amount: u6 = 0,
-
-        pub const Type = enum(u2) {
-            lsl,
-            lsr,
-            asr,
-            ror,
-        };
-
-        pub const none = Shift{
-            .shift = .lsl,
-            .amount = 0,
-        };
-    };
+    data_processing_3_source: packed struct {
+        rd: u5,
+        rn: u5,
+        ra: u5,
+        o0: u1,
+        rm: u5,
+        op31: u3,
+        fixed: u5 = 0b11011,
+        op54: u2,
+        sf: u1,
+    },
 
     pub const Condition = enum(u4) {
         /// Integer: Equal
@@ -470,6 +464,7 @@ pub const Instruction = union(enum) {
             .conditional_branch => |v| @as(u32, v.cond) | (@as(u32, v.o0) << 4) | (@as(u32, v.imm19) << 5) | (@as(u32, v.o1) << 24) | (@as(u32, v.fixed) << 25),
             .compare_and_branch => |v| @as(u32, v.rt) | (@as(u32, v.imm19) << 5) | (@as(u32, v.op) << 24) | (@as(u32, v.fixed) << 25) | (@as(u32, v.sf) << 31),
             .conditional_select => |v| @as(u32, v.rd) | @as(u32, v.rn) << 5 | @as(u32, v.op2) << 10 | @as(u32, v.cond) << 12 | @as(u32, v.rm) << 16 | @as(u32, v.fixed) << 21 | @as(u32, v.s) << 29 | @as(u32, v.op) << 30 | @as(u32, v.sf) << 31,
+            .data_processing_3_source => |v| @bitCast(u32, v),
         };
     }
 
@@ -521,69 +516,73 @@ pub const Instruction = union(enum) {
         };
     }
 
+    pub const LoadStoreOffsetImmediate = union(enum) {
+        post_index: i9,
+        pre_index: i9,
+        unsigned: u12,
+    };
+
+    pub const LoadStoreOffsetRegister = struct {
+        rm: u5,
+        shift: union(enum) {
+            uxtw: u2,
+            lsl: u2,
+            sxtw: u2,
+            sxtx: u2,
+        },
+    };
+
     /// Represents the offset operand of a load or store instruction.
     /// Data can be loaded from memory with either an immediate offset
     /// or an offset that is stored in some register.
     pub const LoadStoreOffset = union(enum) {
-        Immediate: union(enum) {
-            PostIndex: i9,
-            PreIndex: i9,
-            Unsigned: u12,
-        },
-        Register: struct {
-            rm: u5,
-            shift: union(enum) {
-                Uxtw: u2,
-                Lsl: u2,
-                Sxtw: u2,
-                Sxtx: u2,
-            },
-        },
+        immediate: LoadStoreOffsetImmediate,
+        register: LoadStoreOffsetRegister,
 
         pub const none = LoadStoreOffset{
-            .Immediate = .{ .Unsigned = 0 },
+            .immediate = .{ .unsigned = 0 },
         };
 
         pub fn toU12(self: LoadStoreOffset) u12 {
             return switch (self) {
-                .Immediate => |imm_type| switch (imm_type) {
-                    .PostIndex => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 1,
-                    .PreIndex => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 3,
-                    .Unsigned => |v| v,
+                .immediate => |imm_type| switch (imm_type) {
+                    .post_index => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 1,
+                    .pre_index => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 3,
+                    .unsigned => |v| v,
                 },
-                .Register => |r| switch (r.shift) {
-                    .Uxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 16 + 2050,
-                    .Lsl => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 24 + 2050,
-                    .Sxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 48 + 2050,
-                    .Sxtx => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 56 + 2050,
+                .register => |r| switch (r.shift) {
+                    .uxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 16 + 2050,
+                    .lsl => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 24 + 2050,
+                    .sxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 48 + 2050,
+                    .sxtx => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 56 + 2050,
                 },
             };
         }
 
         pub fn imm(offset: u12) LoadStoreOffset {
             return .{
-                .Immediate = .{ .Unsigned = offset },
+                .immediate = .{ .unsigned = offset },
             };
         }
 
         pub fn imm_post_index(offset: i9) LoadStoreOffset {
             return .{
-                .Immediate = .{ .PostIndex = offset },
+                .immediate = .{ .post_index = offset },
             };
         }
 
         pub fn imm_pre_index(offset: i9) LoadStoreOffset {
             return .{
-                .Immediate = .{ .PreIndex = offset },
+                .immediate = .{ .pre_index = offset },
             };
         }
 
         pub fn reg(rm: Register) LoadStoreOffset {
             return .{
-                .Register = .{
+                .register = .{
                     .rm = rm.id(),
                     .shift = .{
-                        .Lsl = 0,
+                        .lsl = 0,
                     },
                 },
             };
@@ -592,10 +591,10 @@ pub const Instruction = union(enum) {
         pub fn reg_uxtw(rm: Register, shift: u2) LoadStoreOffset {
             assert(rm.size() == 32 and (shift == 0 or shift == 2));
             return .{
-                .Register = .{
+                .register = .{
                     .rm = rm.id(),
                     .shift = .{
-                        .Uxtw = shift,
+                        .uxtw = shift,
                     },
                 },
             };
@@ -604,10 +603,10 @@ pub const Instruction = union(enum) {
         pub fn reg_lsl(rm: Register, shift: u2) LoadStoreOffset {
             assert(rm.size() == 64 and (shift == 0 or shift == 3));
             return .{
-                .Register = .{
+                .register = .{
                     .rm = rm.id(),
                     .shift = .{
-                        .Lsl = shift,
+                        .lsl = shift,
                     },
                 },
             };
@@ -616,10 +615,10 @@ pub const Instruction = union(enum) {
         pub fn reg_sxtw(rm: Register, shift: u2) LoadStoreOffset {
             assert(rm.size() == 32 and (shift == 0 or shift == 2));
             return .{
-                .Register = .{
+                .register = .{
                     .rm = rm.id(),
                     .shift = .{
-                        .Sxtw = shift,
+                        .sxtw = shift,
                     },
                 },
             };
@@ -628,10 +627,10 @@ pub const Instruction = union(enum) {
         pub fn reg_sxtx(rm: Register, shift: u2) LoadStoreOffset {
             assert(rm.size() == 64 and (shift == 0 or shift == 3));
             return .{
-                .Register = .{
+                .register = .{
                     .rm = rm.id(),
                     .shift = .{
-                        .Sxtx = shift,
+                        .sxtx = shift,
                     },
                 },
             };
@@ -663,8 +662,8 @@ pub const Instruction = union(enum) {
         const off = offset.toU12();
         const op1: u2 = blk: {
             switch (offset) {
-                .Immediate => |imm| switch (imm) {
-                    .Unsigned => break :blk 0b01,
+                .immediate => |imm| switch (imm) {
+                    .unsigned => break :blk 0b01,
                     else => {},
                 },
                 else => {},
@@ -803,25 +802,28 @@ pub const Instruction = union(enum) {
         };
     }
 
+    pub const LogicalShiftedRegisterShift = enum(u2) { lsl, lsr, asr, ror };
+
     fn logicalShiftedRegister(
         opc: u2,
         n: u1,
-        shift: Shift,
         rd: Register,
         rn: Register,
         rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
     ) Instruction {
         switch (rd.size()) {
             32 => {
-                assert(shift.amount < 32);
+                assert(amount < 32);
                 return Instruction{
                     .logical_shifted_register = .{
                         .rd = rd.id(),
                         .rn = rn.id(),
-                        .imm6 = shift.amount,
+                        .imm6 = amount,
                         .rm = rm.id(),
                         .n = n,
-                        .shift = @enumToInt(shift.shift),
+                        .shift = @enumToInt(shift),
                         .opc = opc,
                         .sf = 0b0,
                     },
@@ -832,10 +834,10 @@ pub const Instruction = union(enum) {
                     .logical_shifted_register = .{
                         .rd = rd.id(),
                         .rn = rn.id(),
-                        .imm6 = shift.amount,
+                        .imm6 = amount,
                         .rm = rm.id(),
                         .n = n,
-                        .shift = @enumToInt(shift.shift),
+                        .shift = @enumToInt(shift),
                         .opc = opc,
                         .sf = 0b1,
                     },
@@ -963,6 +965,33 @@ pub const Instruction = union(enum) {
         };
     }
 
+    fn dataProcessing3Source(
+        op54: u2,
+        op31: u3,
+        o0: u1,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        ra: Register,
+    ) Instruction {
+        return Instruction{
+            .data_processing_3_source = .{
+                .rd = rd.id(),
+                .rn = rn.id(),
+                .ra = ra.id(),
+                .o0 = o0,
+                .rm = rm.id(),
+                .op31 = op31,
+                .op54 = op54,
+                .sf = switch (rd.size()) {
+                    32 => 0b0,
+                    64 => 0b1,
+                    else => unreachable, // unexpected register size
+                },
+            },
+        };
+    }
+
     // Helper functions for assembly syntax functions
 
     // Move wide (immediate)
@@ -1023,26 +1052,26 @@ pub const Instruction = union(enum) {
 
     pub const LoadStorePairOffset = struct {
         encoding: enum(u2) {
-            PostIndex = 0b01,
-            Signed = 0b10,
-            PreIndex = 0b11,
+            post_index = 0b01,
+            signed = 0b10,
+            pre_index = 0b11,
         },
         offset: i9,
 
         pub fn none() LoadStorePairOffset {
-            return .{ .encoding = .Signed, .offset = 0 };
+            return .{ .encoding = .signed, .offset = 0 };
         }
 
         pub fn post_index(imm: i9) LoadStorePairOffset {
-            return .{ .encoding = .PostIndex, .offset = imm };
+            return .{ .encoding = .post_index, .offset = imm };
         }
 
         pub fn pre_index(imm: i9) LoadStorePairOffset {
-            return .{ .encoding = .PreIndex, .offset = imm };
+            return .{ .encoding = .pre_index, .offset = imm };
         }
 
         pub fn signed(imm: i9) LoadStorePairOffset {
-            return .{ .encoding = .Signed, .offset = imm };
+            return .{ .encoding = .signed, .offset = imm };
         }
     };
 
@@ -1116,36 +1145,84 @@ pub const Instruction = union(enum) {
 
     // Logical (shifted register)
 
-    pub fn @"and"(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b00, 0b0, shift, rd, rn, rm);
+    pub fn @"and"(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b00, 0b0, rd, rn, rm, shift, amount);
     }
 
-    pub fn bic(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b00, 0b1, shift, rd, rn, rm);
+    pub fn bic(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b00, 0b1, rd, rn, rm, shift, amount);
     }
 
-    pub fn orr(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b01, 0b0, shift, rd, rn, rm);
+    pub fn orr(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b01, 0b0, rd, rn, rm, shift, amount);
     }
 
-    pub fn orn(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b01, 0b1, shift, rd, rn, rm);
+    pub fn orn(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b01, 0b1, rd, rn, rm, shift, amount);
     }
 
-    pub fn eor(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b10, 0b0, shift, rd, rn, rm);
+    pub fn eor(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b10, 0b0, rd, rn, rm, shift, amount);
     }
 
-    pub fn eon(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b10, 0b1, shift, rd, rn, rm);
+    pub fn eon(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b10, 0b1, rd, rn, rm, shift, amount);
     }
 
-    pub fn ands(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b11, 0b0, shift, rd, rn, rm);
+    pub fn ands(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b11, 0b0, rd, rn, rm, shift, amount);
     }
 
-    pub fn bics(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b11, 0b1, shift, rd, rn, rm);
+    pub fn bics(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b11, 0b1, rd, rn, rm, shift, amount);
     }
 
     // Add/subtract (immediate)
@@ -1241,6 +1318,24 @@ pub const Instruction = union(enum) {
     pub fn csneg(rd: Register, rn: Register, rm: Register, cond: Condition) Instruction {
         return conditionalSelect(0b01, 0b1, 0b0, rd, rn, rm, cond);
     }
+
+    // Data processing (3 source)
+
+    pub fn madd(rd: Register, rn: Register, rm: Register, ra: Register) Instruction {
+        return dataProcessing3Source(0b00, 0b000, 0b0, rd, rn, rm, ra);
+    }
+
+    pub fn msub(rd: Register, rn: Register, rm: Register, ra: Register) Instruction {
+        return dataProcessing3Source(0b00, 0b000, 0b1, rd, rn, rm, ra);
+    }
+
+    pub fn mul(rd: Register, rn: Register, rm: Register) Instruction {
+        return madd(rd, rn, rm, .xzr);
+    }
+
+    pub fn mneg(rd: Register, rn: Register, rm: Register) Instruction {
+        return msub(rd, rn, rm, .xzr);
+    }
 };
 
 test {
@@ -1255,11 +1350,11 @@ test "serialize instructions" {
 
     const testcases = [_]Testcase{
         .{ // orr x0, xzr, x1
-            .inst = Instruction.orr(.x0, .xzr, .x1, Instruction.Shift.none),
+            .inst = Instruction.orr(.x0, .xzr, .x1, .lsl, 0),
             .expected = 0b1_01_01010_00_0_00001_000000_11111_00000,
         },
         .{ // orn x0, xzr, x1
-            .inst = Instruction.orn(.x0, .xzr, .x1, Instruction.Shift.none),
+            .inst = Instruction.orn(.x0, .xzr, .x1, .lsl, 0),
             .expected = 0b1_01_01010_00_1_00001_000000_11111_00000,
         },
         .{ // movz x1, #4
@@ -1379,11 +1474,11 @@ test "serialize instructions" {
             .expected = 0b10_101_0_001_1_0000010_00010_11111_00001,
         },
         .{ // and x0, x4, x2
-            .inst = Instruction.@"and"(.x0, .x4, .x2, .{}),
+            .inst = Instruction.@"and"(.x0, .x4, .x2, .lsl, 0),
             .expected = 0b1_00_01010_00_0_00010_000000_00100_00000,
         },
         .{ // and x0, x4, x2, lsl #0x8
-            .inst = Instruction.@"and"(.x0, .x4, .x2, .{ .shift = .lsl, .amount = 0x8 }),
+            .inst = Instruction.@"and"(.x0, .x4, .x2, .lsl, 0x8),
             .expected = 0b1_00_01010_00_0_00010_001000_00100_00000,
         },
         .{ // add x0, x10, #10
@@ -1409,6 +1504,10 @@ test "serialize instructions" {
         .{ // csinc x1, x2, x4, eq
             .inst = Instruction.csinc(.x1, .x2, .x4, .eq),
             .expected = 0b1_0_0_11010100_00100_0000_0_1_00010_00001,
+        },
+        .{ // mul x1, x4, x9
+            .inst = Instruction.mul(.x1, .x4, .x9),
+            .expected = 0b1_00_11011_000_01001_0_11111_00100_00001,
         },
     };
 

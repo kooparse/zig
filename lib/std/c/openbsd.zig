@@ -94,11 +94,11 @@ pub const dl_phdr_info = extern struct {
 };
 
 pub const Flock = extern struct {
-    l_start: off_t,
-    l_len: off_t,
-    l_pid: pid_t,
-    l_type: c_short,
-    l_whence: c_short,
+    start: off_t,
+    len: off_t,
+    pid: pid_t,
+    type: c_short,
+    whence: c_short,
 };
 
 pub const addrinfo = extern struct {
@@ -235,6 +235,10 @@ pub const Stat = extern struct {
     pub fn ctime(self: @This()) timespec {
         return self.ctim;
     }
+
+    pub fn birthtime(self: @This()) timespec {
+        return self.birthtim;
+    }
 };
 
 pub const timespec = extern struct {
@@ -361,6 +365,12 @@ pub const MAP = struct {
     pub const ANONYMOUS = ANON;
     pub const STACK = 0x4000;
     pub const CONCEAL = 0x8000;
+};
+
+pub const MSF = struct {
+    pub const ASYNC = 1;
+    pub const INVALIDATE = 2;
+    pub const SYNC = 4;
 };
 
 pub const W = struct {
@@ -982,7 +992,7 @@ comptime {
         std.debug.assert(@sizeOf(siginfo_t) == 136);
 }
 
-const arch_bits = switch (builtin.cpu.arch) {
+pub usingnamespace switch (builtin.cpu.arch) {
     .x86_64 => struct {
         pub const ucontext_t = extern struct {
             sc_rdi: c_long,
@@ -1012,7 +1022,7 @@ const arch_bits = switch (builtin.cpu.arch) {
             sc_rsp: c_long,
             sc_ss: c_long,
 
-            sc_fpstate: arch_bits.fxsave64,
+            sc_fpstate: fxsave64,
             __sc_unused: c_int,
             sc_mask: c_int,
             sc_cookie: c_long,
@@ -1035,8 +1045,6 @@ const arch_bits = switch (builtin.cpu.arch) {
     },
     else => struct {},
 };
-pub const ucontext_t = arch_bits.ucontext_t;
-pub const fxsave64 = arch_bits.fxsave64;
 
 pub const sigset_t = c_uint;
 pub const empty_sigset: sigset_t = 0;

@@ -179,6 +179,9 @@ pub const Inst = struct {
         /// Shift right. `>>`
         /// Uses the `bin_op` field.
         shr,
+        /// Shift right. The shift produces a poison value if it shifts out any non-zero bits.
+        /// Uses the `bin_op` field.
+        shr_exact,
         /// Shift left. `<<`
         /// Uses the `bin_op` field.
         shl,
@@ -233,6 +236,46 @@ pub const Inst = struct {
         /// Result type will always be an unsigned integer big enough to fit the answer.
         /// Uses the `ty_op` field.
         popcount,
+
+        /// Square root of a floating point number.
+        /// Uses the `un_op` field.
+        sqrt,
+        /// Sine a floating point number.
+        /// Uses the `un_op` field.
+        sin,
+        /// Cosine a floating point number.
+        /// Uses the `un_op` field.
+        cos,
+        /// Base e exponential of a floating point number.
+        /// Uses the `un_op` field.
+        exp,
+        /// Base 2 exponential of a floating point number.
+        /// Uses the `un_op` field.
+        exp2,
+        /// Natural (base e) logarithm of a floating point number.
+        /// Uses the `un_op` field.
+        log,
+        /// Base 2 logarithm of a floating point number.
+        /// Uses the `un_op` field.
+        log2,
+        /// Base 10 logarithm of a floating point number.
+        /// Uses the `un_op` field.
+        log10,
+        /// Aboslute value of a floating point number.
+        /// Uses the `un_op` field.
+        fabs,
+        /// Floor: rounds a floating pointer number down to the nearest integer.
+        /// Uses the `un_op` field.
+        floor,
+        /// Ceiling: rounds a floating pointer number up to the nearest integer.
+        /// Uses the `un_op` field.
+        ceil,
+        /// Rounds a floating pointer number to the nearest integer.
+        /// Uses the `un_op` field.
+        round,
+        /// Rounds a floating pointer number to the nearest integer towards zero.
+        /// Uses the `un_op` field.
+        trunc_float,
 
         /// `<`. Result type is always bool.
         /// Uses the `bin_op` field.
@@ -426,7 +469,8 @@ pub const Inst = struct {
         /// Given a pointer to a slice, return a pointer to the pointer of the slice.
         /// Uses the `ty_op` field.
         ptr_slice_ptr_ptr,
-        /// Given an array value and element index, return the element value at that index.
+        /// Given an (array value or vector value) and element index,
+        /// return the element value at that index.
         /// Result type is the element type of the array operand.
         /// Uses the `bin_op` field.
         array_elem_val,
@@ -455,6 +499,10 @@ pub const Inst = struct {
         /// Given an integer operand, return the float with the closest mathematical meaning.
         /// Uses the `ty_op` field.
         int_to_float,
+        /// Given an integer, bool, float, or pointer operand, return a vector with all elements
+        /// equal to the scalar value.
+        /// Uses the `ty_op` field.
+        splat,
 
         /// Given dest ptr, value, and len, set all elements at dest to value.
         /// Result type is always void.
@@ -500,6 +548,23 @@ pub const Inst = struct {
         /// Result type is always `[:0]const u8`.
         /// Uses the `un_op` field.
         tag_name,
+
+        /// Given an error value, return the error name. Result type is always `[:0] const u8`.
+        /// Uses the `un_op` field.
+        error_name,
+
+        /// Constructs a vector, tuple, or array value out of runtime-known elements.
+        /// Some of the elements may be comptime-known.
+        /// Uses the `ty_pl` field, payload is index of an array of elements, each of which
+        /// is a `Ref`. Length of the array is given by the vector type.
+        /// TODO rename this to `aggregate_init` and make it support array values and
+        /// struct values too.
+        vector_init,
+
+        /// Communicates an intent to load memory.
+        /// Result is always unused.
+        /// Uses the `prefetch` field.
+        prefetch,
 
         pub fn fromCmpOp(op: std.math.CompareOperator) Tag {
             return switch (op) {
@@ -571,6 +636,12 @@ pub const Inst = struct {
         atomic_load: struct {
             ptr: Ref,
             order: std.builtin.AtomicOrder,
+        },
+        prefetch: struct {
+            ptr: Ref,
+            rw: std.builtin.PrefetchOptions.Rw,
+            locality: u2,
+            cache: std.builtin.PrefetchOptions.Cache,
         },
 
         // Make sure we don't accidentally add a field to make this union
@@ -711,12 +782,28 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .ptr_add,
         .ptr_sub,
         .shr,
+        .shr_exact,
         .shl,
         .shl_exact,
         .shl_sat,
         .min,
         .max,
         => return air.typeOf(datas[inst].bin_op.lhs),
+
+        .sqrt,
+        .sin,
+        .cos,
+        .exp,
+        .exp2,
+        .log,
+        .log2,
+        .log10,
+        .fabs,
+        .floor,
+        .ceil,
+        .round,
+        .trunc_float,
+        => return air.typeOf(datas[inst].un_op),
 
         .cmp_lt,
         .cmp_lte,
@@ -752,6 +839,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .cmpxchg_weak,
         .cmpxchg_strong,
         .slice,
+        .vector_init,
         => return air.getRefType(datas[inst].ty_pl.ty),
 
         .not,
@@ -781,6 +869,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .array_to_slice,
         .float_to_int,
         .int_to_float,
+        .splat,
         .get_union_tag,
         .clz,
         .ctz,
@@ -807,6 +896,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .memset,
         .memcpy,
         .set_union_tag,
+        .prefetch,
         => return Type.initTag(.void),
 
         .ptrtoint,
@@ -816,7 +906,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
 
         .bool_to_int => return Type.initTag(.u1),
 
-        .tag_name => return Type.initTag(.const_slice_u8_sentinel_0),
+        .tag_name, .error_name => return Type.initTag(.const_slice_u8_sentinel_0),
 
         .call => {
             const callee_ty = air.typeOf(datas[inst].pl_op.operand);

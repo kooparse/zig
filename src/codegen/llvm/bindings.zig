@@ -548,6 +548,12 @@ pub const Builder = opaque {
     pub const buildAShr = LLVMBuildAShr;
     extern fn LLVMBuildAShr(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
 
+    pub const buildLShrExact = ZigLLVMBuildLShrExact;
+    extern fn ZigLLVMBuildLShrExact(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildAShrExact = ZigLLVMBuildAShrExact;
+    extern fn ZigLLVMBuildAShrExact(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
     pub const buildShl = LLVMBuildShl;
     extern fn LLVMBuildShl(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
 
@@ -820,6 +826,9 @@ pub const Builder = opaque {
 
     pub const setCurrentDebugLocation2 = LLVMSetCurrentDebugLocation2;
     extern fn LLVMSetCurrentDebugLocation2(Builder: *const Builder, Loc: *Metadata) void;
+
+    pub const buildShuffleVector = LLVMBuildShuffleVector;
+    extern fn LLVMBuildShuffleVector(*const Builder, V1: *const Value, V2: *const Value, Mask: *const Value, Name: [*:0]const u8) *const Value;
 };
 
 pub const DIScope = opaque {};
