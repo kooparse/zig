@@ -80,6 +80,14 @@ pub fn emitMir(
             .cmp_immediate => try emit.mirAddSubtractImmediate(inst),
             .sub_immediate => try emit.mirAddSubtractImmediate(inst),
 
+            .asr_register => try emit.mirShiftRegister(inst),
+            .lsl_register => try emit.mirShiftRegister(inst),
+            .lsr_register => try emit.mirShiftRegister(inst),
+
+            .asr_immediate => try emit.mirShiftImmediate(inst),
+            .lsl_immediate => try emit.mirShiftImmediate(inst),
+            .lsr_immediate => try emit.mirShiftImmediate(inst),
+
             .b_cond => try emit.mirConditionalBranchImmediate(inst),
 
             .b => try emit.mirBranch(inst),
@@ -95,6 +103,8 @@ pub fn emitMir(
 
             .call_extern => try emit.mirCallExtern(inst),
 
+            .eor_immediate => try emit.mirLogicalImmediate(inst),
+
             .add_shifted_register => try emit.mirAddSubtractShiftedRegister(inst),
             .cmp_shifted_register => try emit.mirAddSubtractShiftedRegister(inst),
             .sub_shifted_register => try emit.mirAddSubtractShiftedRegister(inst),
@@ -106,9 +116,14 @@ pub fn emitMir(
             .dbg_prologue_end => try emit.mirDebugPrologueEnd(),
             .dbg_epilogue_begin => try emit.mirDebugEpilogueBegin(),
 
+            .and_shifted_register => try emit.mirLogicalShiftedRegister(inst),
             .eor_shifted_register => try emit.mirLogicalShiftedRegister(inst),
+            .orr_shifted_register => try emit.mirLogicalShiftedRegister(inst),
 
-            .load_memory => try emit.mirLoadMemory(inst),
+            .load_memory_got => try emit.mirLoadMemoryPie(inst),
+            .load_memory_direct => try emit.mirLoadMemoryPie(inst),
+            .load_memory_ptr_got => try emit.mirLoadMemoryPie(inst),
+            .load_memory_ptr_direct => try emit.mirLoadMemoryPie(inst),
 
             .ldp => try emit.mirLoadStoreRegisterPair(inst),
             .stp => try emit.mirLoadStoreRegisterPair(inst),
@@ -116,6 +131,8 @@ pub fn emitMir(
             .ldr_stack => try emit.mirLoadStoreStack(inst),
             .ldrb_stack => try emit.mirLoadStoreStack(inst),
             .ldrh_stack => try emit.mirLoadStoreStack(inst),
+            .ldrsb_stack => try emit.mirLoadStoreStack(inst),
+            .ldrsh_stack => try emit.mirLoadStoreStack(inst),
             .str_stack => try emit.mirLoadStoreStack(inst),
             .strb_stack => try emit.mirLoadStoreStack(inst),
             .strh_stack => try emit.mirLoadStoreStack(inst),
@@ -130,6 +147,9 @@ pub fn emitMir(
             .ldr_immediate => try emit.mirLoadStoreRegisterImmediate(inst),
             .ldrb_immediate => try emit.mirLoadStoreRegisterImmediate(inst),
             .ldrh_immediate => try emit.mirLoadStoreRegisterImmediate(inst),
+            .ldrsb_immediate => try emit.mirLoadStoreRegisterImmediate(inst),
+            .ldrsh_immediate => try emit.mirLoadStoreRegisterImmediate(inst),
+            .ldrsw_immediate => try emit.mirLoadStoreRegisterImmediate(inst),
             .str_immediate => try emit.mirLoadStoreRegisterImmediate(inst),
             .strb_immediate => try emit.mirLoadStoreRegisterImmediate(inst),
             .strh_immediate => try emit.mirLoadStoreRegisterImmediate(inst),
@@ -147,6 +167,17 @@ pub fn emitMir(
 
             .push_regs => try emit.mirPushPopRegs(inst),
             .pop_regs => try emit.mirPushPopRegs(inst),
+
+            .sbfx,
+            .ubfx,
+            => try emit.mirBitfieldExtract(inst),
+
+            .sxtb,
+            .sxth,
+            .sxtw,
+            .uxtb,
+            .uxth,
+            => try emit.mirExtend(inst),
         }
     }
 }
@@ -205,22 +236,11 @@ fn instructionSize(emit: *Emit, inst: Mir.Inst.Index) usize {
     }
 
     switch (tag) {
-        .load_memory => {
-            if (emit.bin_file.options.pie) {
-                // adrp, ldr
-                return 2 * 4;
-            } else {
-                const payload = emit.mir.instructions.items(.data)[inst].payload;
-                const load_memory = emit.mir.extraData(Mir.LoadMemory, payload).data;
-                const addr = load_memory.addr;
-
-                // movz, [movk, ...], ldr
-                if (addr <= math.maxInt(u16)) return 2 * 4;
-                if (addr <= math.maxInt(u32)) return 3 * 4;
-                if (addr <= math.maxInt(u48)) return 4 * 4;
-                return 5 * 4;
-            }
-        },
+        .load_memory_direct => return 3 * 4,
+        .load_memory_got,
+        .load_memory_ptr_got,
+        .load_memory_ptr_direct,
+        => return 2 * 4,
         .pop_regs, .push_regs => {
             const reg_list = emit.mir.instructions.items(.data)[inst].reg_list;
             const number_of_regs = @popCount(u32, reg_list);
@@ -378,36 +398,23 @@ fn fail(emit: *Emit, comptime format: []const u8, args: anytype) InnerError {
     return error.EmitFail;
 }
 
-fn moveImmediate(emit: *Emit, reg: Register, imm64: u64) !void {
-    try emit.writeInstruction(Instruction.movz(reg, @truncate(u16, imm64), 0));
-
-    if (imm64 > math.maxInt(u16)) {
-        try emit.writeInstruction(Instruction.movk(reg, @truncate(u16, imm64 >> 16), 16));
-    }
-    if (imm64 > math.maxInt(u32)) {
-        try emit.writeInstruction(Instruction.movk(reg, @truncate(u16, imm64 >> 32), 32));
-    }
-    if (imm64 > math.maxInt(u48)) {
-        try emit.writeInstruction(Instruction.movk(reg, @truncate(u16, imm64 >> 48), 48));
-    }
-}
-
 fn dbgAdvancePCAndLine(self: *Emit, line: u32, column: u32) !void {
     const delta_line = @intCast(i32, line) - @intCast(i32, self.prev_di_line);
     const delta_pc: usize = self.code.items.len - self.prev_di_pc;
     switch (self.debug_output) {
-        .dwarf => |dbg_out| {
+        .dwarf => |dw| {
             // TODO Look into using the DWARF special opcodes to compress this data.
             // It lets you emit single-byte opcodes that add different numbers to
             // both the PC and the line number at the same time.
-            try dbg_out.dbg_line.ensureUnusedCapacity(11);
-            dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.advance_pc);
-            leb128.writeULEB128(dbg_out.dbg_line.writer(), delta_pc) catch unreachable;
+            const dbg_line = &dw.dbg_line;
+            try dbg_line.ensureUnusedCapacity(11);
+            dbg_line.appendAssumeCapacity(DW.LNS.advance_pc);
+            leb128.writeULEB128(dbg_line.writer(), delta_pc) catch unreachable;
             if (delta_line != 0) {
-                dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.advance_line);
-                leb128.writeILEB128(dbg_out.dbg_line.writer(), delta_line) catch unreachable;
+                dbg_line.appendAssumeCapacity(DW.LNS.advance_line);
+                leb128.writeILEB128(dbg_line.writer(), delta_line) catch unreachable;
             }
-            dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.copy);
+            dbg_line.appendAssumeCapacity(DW.LNS.copy);
             self.prev_di_pc = self.code.items.len;
             self.prev_di_line = line;
             self.prev_di_column = column;
@@ -466,9 +473,44 @@ fn mirAddSubtractImmediate(emit: *Emit, inst: Mir.Inst.Index) !void {
             const rn = r_imm12_sh.rn;
             const imm12 = r_imm12_sh.imm12;
             const sh = r_imm12_sh.sh == 1;
+            const zr: Register = switch (rn.size()) {
+                32 => .wzr,
+                64 => .xzr,
+                else => unreachable,
+            };
 
-            try emit.writeInstruction(Instruction.subs(.xzr, rn, imm12, sh));
+            try emit.writeInstruction(Instruction.subs(zr, rn, imm12, sh));
         },
+        else => unreachable,
+    }
+}
+
+fn mirShiftRegister(emit: *Emit, inst: Mir.Inst.Index) !void {
+    const tag = emit.mir.instructions.items(.tag)[inst];
+    const rrr = emit.mir.instructions.items(.data)[inst].rrr;
+    const rd = rrr.rd;
+    const rn = rrr.rn;
+    const rm = rrr.rm;
+
+    switch (tag) {
+        .asr_register => try emit.writeInstruction(Instruction.asrRegister(rd, rn, rm)),
+        .lsl_register => try emit.writeInstruction(Instruction.lslRegister(rd, rn, rm)),
+        .lsr_register => try emit.writeInstruction(Instruction.lsrRegister(rd, rn, rm)),
+        else => unreachable,
+    }
+}
+
+fn mirShiftImmediate(emit: *Emit, inst: Mir.Inst.Index) !void {
+    const tag = emit.mir.instructions.items(.tag)[inst];
+    const rr_shift = emit.mir.instructions.items(.data)[inst].rr_shift;
+    const rd = rr_shift.rd;
+    const rn = rr_shift.rn;
+    const shift = rr_shift.shift;
+
+    switch (tag) {
+        .asr_immediate => try emit.writeInstruction(Instruction.asrImmediate(rd, rn, shift)),
+        .lsl_immediate => try emit.writeInstruction(Instruction.lslImmediate(rd, rn, shift)),
+        .lsr_immediate => try emit.writeInstruction(Instruction.lsrImmediate(rd, rn, shift)),
         else => unreachable,
     }
 }
@@ -566,8 +608,8 @@ fn mirDbgLine(emit: *Emit, inst: Mir.Inst.Index) !void {
 
 fn mirDebugPrologueEnd(self: *Emit) !void {
     switch (self.debug_output) {
-        .dwarf => |dbg_out| {
-            try dbg_out.dbg_line.append(DW.LNS.set_prologue_end);
+        .dwarf => |dw| {
+            try dw.dbg_line.append(DW.LNS.set_prologue_end);
             try self.dbgAdvancePCAndLine(self.prev_di_line, self.prev_di_column);
         },
         .plan9 => {},
@@ -577,8 +619,8 @@ fn mirDebugPrologueEnd(self: *Emit) !void {
 
 fn mirDebugEpilogueBegin(self: *Emit) !void {
     switch (self.debug_output) {
-        .dwarf => |dbg_out| {
-            try dbg_out.dbg_line.append(DW.LNS.set_epilogue_begin);
+        .dwarf => |dw| {
+            try dw.dbg_line.append(DW.LNS.set_epilogue_begin);
             try self.dbgAdvancePCAndLine(self.prev_di_line, self.prev_di_column);
         },
         .plan9 => {},
@@ -613,19 +655,54 @@ fn mirCallExtern(emit: *Emit, inst: Mir.Inst.Index) !void {
     }
 }
 
-fn mirAddSubtractShiftedRegister(emit: *Emit, inst: Mir.Inst.Index) !void {
+fn mirLogicalImmediate(emit: *Emit, inst: Mir.Inst.Index) !void {
     const tag = emit.mir.instructions.items(.tag)[inst];
-    const rrr_imm6_shift = emit.mir.instructions.items(.data)[inst].rrr_imm6_shift;
-    const rd = rrr_imm6_shift.rd;
-    const rn = rrr_imm6_shift.rn;
-    const rm = rrr_imm6_shift.rm;
-    const shift = rrr_imm6_shift.shift;
-    const imm6 = rrr_imm6_shift.imm6;
+    const rr_bitmask = emit.mir.instructions.items(.data)[inst].rr_bitmask;
+    const rd = rr_bitmask.rd;
+    const rn = rr_bitmask.rn;
+    const imms = rr_bitmask.imms;
+    const immr = rr_bitmask.immr;
+    const n = rr_bitmask.n;
 
     switch (tag) {
-        .add_shifted_register => try emit.writeInstruction(Instruction.addShiftedRegister(rd, rn, rm, shift, imm6)),
-        .cmp_shifted_register => try emit.writeInstruction(Instruction.subsShiftedRegister(rd, rn, rm, shift, imm6)),
-        .sub_shifted_register => try emit.writeInstruction(Instruction.subShiftedRegister(rd, rn, rm, shift, imm6)),
+        .eor_immediate => try emit.writeInstruction(Instruction.eorImmediate(rd, rn, imms, immr, n)),
+        else => unreachable,
+    }
+}
+
+fn mirAddSubtractShiftedRegister(emit: *Emit, inst: Mir.Inst.Index) !void {
+    const tag = emit.mir.instructions.items(.tag)[inst];
+    switch (tag) {
+        .add_shifted_register,
+        .sub_shifted_register,
+        => {
+            const rrr_imm6_shift = emit.mir.instructions.items(.data)[inst].rrr_imm6_shift;
+            const rd = rrr_imm6_shift.rd;
+            const rn = rrr_imm6_shift.rn;
+            const rm = rrr_imm6_shift.rm;
+            const shift = rrr_imm6_shift.shift;
+            const imm6 = rrr_imm6_shift.imm6;
+
+            switch (tag) {
+                .add_shifted_register => try emit.writeInstruction(Instruction.addShiftedRegister(rd, rn, rm, shift, imm6)),
+                .sub_shifted_register => try emit.writeInstruction(Instruction.subShiftedRegister(rd, rn, rm, shift, imm6)),
+                else => unreachable,
+            }
+        },
+        .cmp_shifted_register => {
+            const rr_imm6_shift = emit.mir.instructions.items(.data)[inst].rr_imm6_shift;
+            const rn = rr_imm6_shift.rn;
+            const rm = rr_imm6_shift.rm;
+            const shift = rr_imm6_shift.shift;
+            const imm6 = rr_imm6_shift.imm6;
+            const zr: Register = switch (rn.size()) {
+                32 => .wzr,
+                64 => .xzr,
+                else => unreachable,
+            };
+
+            try emit.writeInstruction(Instruction.subsShiftedRegister(zr, rn, rm, shift, imm6));
+        },
         else => unreachable,
     }
 }
@@ -635,7 +712,12 @@ fn mirConditionalSelect(emit: *Emit, inst: Mir.Inst.Index) !void {
     switch (tag) {
         .cset => {
             const r_cond = emit.mir.instructions.items(.data)[inst].r_cond;
-            try emit.writeInstruction(Instruction.csinc(r_cond.rd, .xzr, .xzr, r_cond.cond));
+            const zr: Register = switch (r_cond.rd.size()) {
+                32 => .wzr,
+                64 => .xzr,
+                else => unreachable,
+            };
+            try emit.writeInstruction(Instruction.csinc(r_cond.rd, zr, zr, r_cond.cond));
         },
         else => unreachable,
     }
@@ -651,65 +733,100 @@ fn mirLogicalShiftedRegister(emit: *Emit, inst: Mir.Inst.Index) !void {
     const imm6 = rrr_imm6_logical_shift.imm6;
 
     switch (tag) {
-        .eor_shifted_register => try emit.writeInstruction(Instruction.eor(rd, rn, rm, shift, imm6)),
+        .and_shifted_register => try emit.writeInstruction(Instruction.andShiftedRegister(rd, rn, rm, shift, imm6)),
+        .eor_shifted_register => try emit.writeInstruction(Instruction.eorShiftedRegister(rd, rn, rm, shift, imm6)),
+        .orr_shifted_register => try emit.writeInstruction(Instruction.orrShiftedRegister(rd, rn, rm, shift, imm6)),
         else => unreachable,
     }
 }
 
-fn mirLoadMemory(emit: *Emit, inst: Mir.Inst.Index) !void {
-    assert(emit.mir.instructions.items(.tag)[inst] == .load_memory);
+fn mirLoadMemoryPie(emit: *Emit, inst: Mir.Inst.Index) !void {
+    const tag = emit.mir.instructions.items(.tag)[inst];
     const payload = emit.mir.instructions.items(.data)[inst].payload;
-    const load_memory = emit.mir.extraData(Mir.LoadMemory, payload).data;
-    const reg = @intToEnum(Register, load_memory.register);
-    const addr = load_memory.addr;
+    const data = emit.mir.extraData(Mir.LoadMemoryPie, payload).data;
+    const reg = @intToEnum(Register, data.register);
 
-    if (emit.bin_file.options.pie) {
-        // PC-relative displacement to the entry in the GOT table.
-        // adrp
-        const offset = @intCast(u32, emit.code.items.len);
-        try emit.writeInstruction(Instruction.adrp(reg, 0));
+    // PC-relative displacement to the entry in memory.
+    // adrp
+    const offset = @intCast(u32, emit.code.items.len);
+    try emit.writeInstruction(Instruction.adrp(reg.to64(), 0));
 
-        // ldr reg, reg, offset
-        try emit.writeInstruction(Instruction.ldr(
-            reg,
-            reg,
-            Instruction.LoadStoreOffset.imm(0),
-        ));
+    switch (tag) {
+        .load_memory_got => {
+            // ldr reg, reg, offset
+            try emit.writeInstruction(Instruction.ldr(
+                reg,
+                reg.to64(),
+                Instruction.LoadStoreOffset.imm(0),
+            ));
+        },
+        .load_memory_direct => {
+            // We cannot load the offset directly as it may not be aligned properly.
+            // For example, load for 64bit register will require the target address offset
+            // to be 8-byte aligned, while the value might have non-8-byte natural alignment,
+            // meaning the linker might have put it at a non-8-byte aligned address. To circumvent
+            // this, we use `adrp, add` to form the address value which we then dereference with
+            // `ldr`.
+            // Note that this can potentially be optimised out by the codegen/linker if the
+            // target address is appropriately aligned.
+            // add reg, reg, offset
+            try emit.writeInstruction(Instruction.add(reg.to64(), reg.to64(), 0, false));
+            // ldr reg, reg, offset
+            try emit.writeInstruction(Instruction.ldr(
+                reg,
+                reg.to64(),
+                Instruction.LoadStoreOffset.imm(0),
+            ));
+        },
+        .load_memory_ptr_got,
+        .load_memory_ptr_direct,
+        => {
+            // add reg, reg, offset
+            try emit.writeInstruction(Instruction.add(reg, reg, 0, false));
+        },
+        else => unreachable,
+    }
 
-        if (emit.bin_file.cast(link.File.MachO)) |macho_file| {
-            const atom = macho_file.atom_by_index_table.get(load_memory.atom_index).?;
-            // Page reloc for adrp instruction.
-            try atom.relocs.append(emit.bin_file.allocator, .{
-                .offset = offset,
-                .target = .{ .local = addr },
-                .addend = 0,
-                .subtractor = null,
-                .pcrel = true,
-                .length = 2,
-                .@"type" = @enumToInt(std.macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21),
-            });
-            // Pageoff reloc for adrp instruction.
-            try atom.relocs.append(emit.bin_file.allocator, .{
-                .offset = offset + 4,
-                .target = .{ .local = addr },
-                .addend = 0,
-                .subtractor = null,
-                .pcrel = false,
-                .length = 2,
-                .@"type" = @enumToInt(std.macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12),
-            });
-        } else {
-            return emit.fail("TODO implement load_memory for PIE GOT indirection on this platform", .{});
-        }
+    if (emit.bin_file.cast(link.File.MachO)) |macho_file| {
+        const atom = macho_file.atom_by_index_table.get(data.atom_index).?;
+        // Page reloc for adrp instruction.
+        try atom.relocs.append(emit.bin_file.allocator, .{
+            .offset = offset,
+            .target = .{ .local = data.sym_index },
+            .addend = 0,
+            .subtractor = null,
+            .pcrel = true,
+            .length = 2,
+            .@"type" = switch (tag) {
+                .load_memory_got,
+                .load_memory_ptr_got,
+                => @enumToInt(std.macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21),
+                .load_memory_direct,
+                .load_memory_ptr_direct,
+                => @enumToInt(std.macho.reloc_type_arm64.ARM64_RELOC_PAGE21),
+                else => unreachable,
+            },
+        });
+        // Pageoff reloc for adrp instruction.
+        try atom.relocs.append(emit.bin_file.allocator, .{
+            .offset = offset + 4,
+            .target = .{ .local = data.sym_index },
+            .addend = 0,
+            .subtractor = null,
+            .pcrel = false,
+            .length = 2,
+            .@"type" = switch (tag) {
+                .load_memory_got,
+                .load_memory_ptr_got,
+                => @enumToInt(std.macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12),
+                .load_memory_direct,
+                .load_memory_ptr_direct,
+                => @enumToInt(std.macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12),
+                else => unreachable,
+            },
+        });
     } else {
-        // The value is in memory at a hard-coded address.
-        // If the type is a pointer, it means the pointer address is at this memory location.
-        try emit.moveImmediate(reg, addr);
-        try emit.writeInstruction(Instruction.ldr(
-            reg,
-            reg,
-            Instruction.LoadStoreOffset.none,
-        ));
+        return emit.fail("TODO implement load_memory for PIE GOT indirection on this platform", .{});
     }
 }
 
@@ -731,17 +848,18 @@ fn mirLoadStoreRegisterPair(emit: *Emit, inst: Mir.Inst.Index) !void {
 fn mirLoadStoreStack(emit: *Emit, inst: Mir.Inst.Index) !void {
     const tag = emit.mir.instructions.items(.tag)[inst];
     const load_store_stack = emit.mir.instructions.items(.data)[inst].load_store_stack;
+    const rt = load_store_stack.rt;
 
     const raw_offset = emit.stack_size - load_store_stack.offset;
     const offset = switch (tag) {
-        .ldrb_stack, .strb_stack => blk: {
+        .ldrb_stack, .ldrsb_stack, .strb_stack => blk: {
             if (math.cast(u12, raw_offset)) |imm| {
                 break :blk Instruction.LoadStoreOffset.imm(imm);
             } else |_| {
                 return emit.fail("TODO load/store stack byte with larger offset", .{});
             }
         },
-        .ldrh_stack, .strh_stack => blk: {
+        .ldrh_stack, .ldrsh_stack, .strh_stack => blk: {
             assert(std.mem.isAlignedGeneric(u32, raw_offset, 2)); // misaligned stack entry
             if (math.cast(u12, @divExact(raw_offset, 2))) |imm| {
                 break :blk Instruction.LoadStoreOffset.imm(imm);
@@ -750,7 +868,7 @@ fn mirLoadStoreStack(emit: *Emit, inst: Mir.Inst.Index) !void {
             }
         },
         .ldr_stack, .str_stack => blk: {
-            const alignment: u32 = switch (load_store_stack.rt.size()) {
+            const alignment: u32 = switch (rt.size()) {
                 32 => 4,
                 64 => 8,
                 else => unreachable,
@@ -767,36 +885,14 @@ fn mirLoadStoreStack(emit: *Emit, inst: Mir.Inst.Index) !void {
     };
 
     switch (tag) {
-        .ldr_stack => try emit.writeInstruction(Instruction.ldr(
-            load_store_stack.rt,
-            Register.sp,
-            offset,
-        )),
-        .ldrb_stack => try emit.writeInstruction(Instruction.ldrb(
-            load_store_stack.rt,
-            Register.sp,
-            offset,
-        )),
-        .ldrh_stack => try emit.writeInstruction(Instruction.ldrh(
-            load_store_stack.rt,
-            Register.sp,
-            offset,
-        )),
-        .str_stack => try emit.writeInstruction(Instruction.str(
-            load_store_stack.rt,
-            Register.sp,
-            offset,
-        )),
-        .strb_stack => try emit.writeInstruction(Instruction.strb(
-            load_store_stack.rt,
-            Register.sp,
-            offset,
-        )),
-        .strh_stack => try emit.writeInstruction(Instruction.strh(
-            load_store_stack.rt,
-            Register.sp,
-            offset,
-        )),
+        .ldr_stack => try emit.writeInstruction(Instruction.ldr(rt, .sp, offset)),
+        .ldrb_stack => try emit.writeInstruction(Instruction.ldrb(rt, .sp, offset)),
+        .ldrh_stack => try emit.writeInstruction(Instruction.ldrh(rt, .sp, offset)),
+        .ldrsb_stack => try emit.writeInstruction(Instruction.ldrsb(rt, .sp, offset)),
+        .ldrsh_stack => try emit.writeInstruction(Instruction.ldrsh(rt, .sp, offset)),
+        .str_stack => try emit.writeInstruction(Instruction.str(rt, .sp, offset)),
+        .strb_stack => try emit.writeInstruction(Instruction.strb(rt, .sp, offset)),
+        .strh_stack => try emit.writeInstruction(Instruction.strh(rt, .sp, offset)),
         else => unreachable,
     }
 }
@@ -812,6 +908,9 @@ fn mirLoadStoreRegisterImmediate(emit: *Emit, inst: Mir.Inst.Index) !void {
         .ldr_immediate => try emit.writeInstruction(Instruction.ldr(rt, rn, offset)),
         .ldrb_immediate => try emit.writeInstruction(Instruction.ldrb(rt, rn, offset)),
         .ldrh_immediate => try emit.writeInstruction(Instruction.ldrh(rt, rn, offset)),
+        .ldrsb_immediate => try emit.writeInstruction(Instruction.ldrsb(rt, rn, offset)),
+        .ldrsh_immediate => try emit.writeInstruction(Instruction.ldrsh(rt, rn, offset)),
+        .ldrsw_immediate => try emit.writeInstruction(Instruction.ldrsw(rt, rn, offset)),
         .str_immediate => try emit.writeInstruction(Instruction.str(rt, rn, offset)),
         .strb_immediate => try emit.writeInstruction(Instruction.strb(rt, rn, offset)),
         .strh_immediate => try emit.writeInstruction(Instruction.strh(rt, rn, offset)),
@@ -842,15 +941,31 @@ fn mirMoveRegister(emit: *Emit, inst: Mir.Inst.Index) !void {
     switch (tag) {
         .mov_register => {
             const rr = emit.mir.instructions.items(.data)[inst].rr;
-            try emit.writeInstruction(Instruction.orr(rr.rd, .xzr, rr.rn, .lsl, 0));
+            const zr: Register = switch (rr.rd.size()) {
+                32 => .wzr,
+                64 => .xzr,
+                else => unreachable,
+            };
+
+            try emit.writeInstruction(Instruction.orrShiftedRegister(rr.rd, zr, rr.rn, .lsl, 0));
         },
         .mov_to_from_sp => {
             const rr = emit.mir.instructions.items(.data)[inst].rr;
             try emit.writeInstruction(Instruction.add(rr.rd, rr.rn, 0, false));
         },
         .mvn => {
-            const rr_imm6_shift = emit.mir.instructions.items(.data)[inst].rr_imm6_shift;
-            try emit.writeInstruction(Instruction.orn(rr_imm6_shift.rd, .xzr, rr_imm6_shift.rm, .lsl, 0));
+            const rr_imm6_logical_shift = emit.mir.instructions.items(.data)[inst].rr_imm6_logical_shift;
+            const rd = rr_imm6_logical_shift.rd;
+            const rm = rr_imm6_logical_shift.rm;
+            const shift = rr_imm6_logical_shift.shift;
+            const imm6 = rr_imm6_logical_shift.imm6;
+            const zr: Register = switch (rd.size()) {
+                32 => .wzr,
+                64 => .xzr,
+                else => unreachable,
+            };
+
+            try emit.writeInstruction(Instruction.ornShiftedRegister(rd, zr, rm, shift, imm6));
         },
         else => unreachable,
     }
@@ -899,12 +1014,12 @@ fn mirPushPopRegs(emit: *Emit, inst: Mir.Inst.Index) !void {
             var other_reg: Register = undefined;
             while (i > 0) : (i -= 1) {
                 const reg = @intToEnum(Register, i - 1);
-                if (reg_list & @as(u32, 1) << reg.id() != 0) {
+                if (reg_list & @as(u32, 1) << @intCast(u5, reg.id()) != 0) {
                     if (count % 2 == 0) {
                         if (count == number_of_regs - 1) {
                             try emit.writeInstruction(Instruction.ldr(
                                 reg,
-                                Register.sp,
+                                .sp,
                                 Instruction.LoadStoreOffset.imm_post_index(16),
                             ));
                         } else {
@@ -914,7 +1029,7 @@ fn mirPushPopRegs(emit: *Emit, inst: Mir.Inst.Index) !void {
                         try emit.writeInstruction(Instruction.ldp(
                             reg,
                             other_reg,
-                            Register.sp,
+                            .sp,
                             Instruction.LoadStorePairOffset.post_index(16),
                         ));
                     }
@@ -929,12 +1044,12 @@ fn mirPushPopRegs(emit: *Emit, inst: Mir.Inst.Index) !void {
             var other_reg: Register = undefined;
             while (i < 32) : (i += 1) {
                 const reg = @intToEnum(Register, i);
-                if (reg_list & @as(u32, 1) << reg.id() != 0) {
+                if (reg_list & @as(u32, 1) << @intCast(u5, reg.id()) != 0) {
                     if (count % 2 == 0) {
                         if (count == number_of_regs - 1) {
                             try emit.writeInstruction(Instruction.str(
                                 reg,
-                                Register.sp,
+                                .sp,
                                 Instruction.LoadStoreOffset.imm_pre_index(-16),
                             ));
                         } else {
@@ -944,7 +1059,7 @@ fn mirPushPopRegs(emit: *Emit, inst: Mir.Inst.Index) !void {
                         try emit.writeInstruction(Instruction.stp(
                             other_reg,
                             reg,
-                            Register.sp,
+                            .sp,
                             Instruction.LoadStorePairOffset.pre_index(-16),
                         ));
                     }
@@ -953,6 +1068,35 @@ fn mirPushPopRegs(emit: *Emit, inst: Mir.Inst.Index) !void {
             }
             assert(count == number_of_regs);
         },
+        else => unreachable,
+    }
+}
+
+fn mirBitfieldExtract(emit: *Emit, inst: Mir.Inst.Index) !void {
+    const tag = emit.mir.instructions.items(.tag)[inst];
+    const rr_lsb_width = emit.mir.instructions.items(.data)[inst].rr_lsb_width;
+    const rd = rr_lsb_width.rd;
+    const rn = rr_lsb_width.rn;
+    const lsb = rr_lsb_width.lsb;
+    const width = rr_lsb_width.width;
+
+    switch (tag) {
+        .sbfx => try emit.writeInstruction(Instruction.sbfx(rd, rn, lsb, width)),
+        .ubfx => try emit.writeInstruction(Instruction.ubfx(rd, rn, lsb, width)),
+        else => unreachable,
+    }
+}
+
+fn mirExtend(emit: *Emit, inst: Mir.Inst.Index) !void {
+    const tag = emit.mir.instructions.items(.tag)[inst];
+    const rr = emit.mir.instructions.items(.data)[inst].rr;
+
+    switch (tag) {
+        .sxtb => try emit.writeInstruction(Instruction.sxtb(rr.rd, rr.rn)),
+        .sxth => try emit.writeInstruction(Instruction.sxth(rr.rd, rr.rn)),
+        .sxtw => try emit.writeInstruction(Instruction.sxtw(rr.rd, rr.rn)),
+        .uxtb => try emit.writeInstruction(Instruction.uxtb(rr.rd, rr.rn)),
+        .uxth => try emit.writeInstruction(Instruction.uxth(rr.rd, rr.rn)),
         else => unreachable,
     }
 }

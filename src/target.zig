@@ -268,6 +268,15 @@ pub fn hasLlvmSupport(target: std.Target) bool {
     };
 }
 
+/// The set of targets that our own self-hosted backends have robust support for.
+/// Used to select between LLVM backend and self-hosted backend when compiling in
+/// debug mode. A given target should only return true here if it is passing greater
+/// than or equal to the number of behavior tests as the respective LLVM backend.
+pub fn selfHostedBackendIsAsRobustAsLlvm(target: std.Target) bool {
+    _ = target;
+    return false;
+}
+
 pub fn supportsStackProbing(target: std.Target) bool {
     return target.os.tag != .windows and target.os.tag != .uefi and
         (target.cpu.arch == .i386 or target.cpu.arch == .x86_64);
@@ -427,18 +436,27 @@ pub fn is_libcpp_lib_name(target: std.Target, name: []const u8) bool {
         eqlIgnoreCase(ignore_case, name, "c++abi");
 }
 
-pub fn is_compiler_rt_lib_name(target: std.Target, name: []const u8) bool {
+pub const CompilerRtClassification = enum { none, only_compiler_rt, only_libunwind, both };
+
+pub fn classifyCompilerRtLibName(target: std.Target, name: []const u8) CompilerRtClassification {
     if (target.abi.isGnu() and std.mem.eql(u8, name, "gcc_s")) {
-        return true;
+        // libgcc_s includes exception handling functions, so if linking this library
+        // is requested, zig needs to instead link libunwind. Otherwise we end up with
+        // the linker unable to find `_Unwind_RaiseException` and other related symbols.
+        return .both;
     }
     if (std.mem.eql(u8, name, "compiler_rt")) {
-        return true;
+        return .only_compiler_rt;
     }
-    return false;
+    if (std.mem.eql(u8, name, "unwind")) {
+        return .only_libunwind;
+    }
+    return .none;
 }
 
 pub fn hasDebugInfo(target: std.Target) bool {
-    return !target.cpu.arch.isWasm();
+    _ = target;
+    return true;
 }
 
 pub fn defaultCompilerRtOptimizeMode(target: std.Target) std.builtin.Mode {
@@ -652,6 +670,7 @@ pub fn defaultFunctionAlignment(target: std.Target) u32 {
     return switch (target.cpu.arch) {
         .arm, .armeb => 4,
         .aarch64, .aarch64_32, .aarch64_be => 4,
+        .sparc, .sparcel, .sparcv9 => 4,
         .riscv64 => 2,
         else => 1,
     };
